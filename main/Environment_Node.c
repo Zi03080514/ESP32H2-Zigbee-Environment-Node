@@ -44,7 +44,7 @@ void app_main(void)
         ESP_LOGE(TAG, "Failed to initialize BME280!");
         return;
     }
-    ESP_LOGI(TAG, "BME280 initialized successfully.");
+    ESP_LOGI(TAG, "BME280 initialized.");
 
     battery_adc_init();
 
@@ -80,14 +80,50 @@ static void i2c_bus_init(void) {
 }
 
 /**
- * @brief Initialize BME280 Sensor
+ * @brief Initialize BME280 Sensor (Forced Mode)
+ * Reuse core steps from bme280_default_init but switch to Forced Mode.
  */
 static esp_err_t bme280_init(void) {
     bme280_sensor = bme280_create(i2c_bus, BME280_I2C_ADDRESS_DEFAULT); // Address 0x76
     if (bme280_sensor == NULL) {
         return ESP_FAIL;
     }
-    return bme280_default_init(bme280_sensor);
+
+    // check if sensor, i.e. the chip ID is correct
+    uint8_t chipid = 0;
+    bme280_dev_t *sens = (bme280_dev_t *) bme280_sensor;
+    if (i2c_bus_read_byte(sens->i2c_dev, BME280_REGISTER_CHIPID, &chipid) != ESP_OK) {
+        ESP_LOGI("BME280:", "bme280_default_init->bme280_read_byte ->BME280_REGISTER_CHIPID failed!!!!:%x", chipid);
+        return ESP_FAIL;
+    }
+    if (chipid != BME280_DEFAULT_CHIPID) {
+        ESP_LOGI("BME280:", "bme280_default_init->BME280_DEFAULT_CHIPID:%x", chipid);
+        return ESP_FAIL;
+    }
+    // reset the sens using soft-reset, this makes sure the IIR is off, etc.
+    if (i2c_bus_write_byte(sens->i2c_dev, BME280_REGISTER_SOFTRESET, 0xB6) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    // wait for chip to wake up.
+    vTaskDelay(300 / portTICK_RATE_MS);
+    // if chip is still reading calibration, delay
+    while (bme280_is_reading_calibration(bme280_sensor)) {
+        vTaskDelay(100 / portTICK_RATE_MS);
+    }
+    if (bme280_read_coefficients(bme280_sensor) != ESP_OK) { // read trimming parameters, see DS 4.2.2
+        return ESP_FAIL;
+    }
+    // Apply configuration with Forced Mode
+    if (bme280_set_sampling(bme280_sensor,
+                            BME280_MODE_FORCED,     // Change: Normal -> Forced
+                            BME280_SAMPLING_X16,
+                            BME280_SAMPLING_X16,
+                            BME280_SAMPLING_X16,
+                            BME280_FILTER_OFF,
+                            BME280_STANDBY_MS_0_5) != ESP_OK) {
+        return ESP_FAIL;
+                            }
+    return ESP_OK;
 }
 
 /**
@@ -123,6 +159,10 @@ static void battery_adc_init(void) {
  * @brief Read Data from BME280 Sensor
  */
 static void bme280_read(float *temp, float *hum, float *pres) {
+    ESP_ERROR_CHECK(bme280_take_forced_measurement(bme280_sensor));
+
+    vTaskDelay(pdMS_TO_TICKS(150)); // Wait for measurement conversion
+
     bme280_read_temperature(bme280_sensor, temp);
     bme280_read_humidity(bme280_sensor, hum);
     bme280_read_pressure(bme280_sensor, pres);
