@@ -7,6 +7,8 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
+#include "esp_zigbee_core.h"
+#include "nvs_flash.h"
 
 // Define the tag for logs
 static const char *TAG = "TML_EN1";
@@ -28,8 +30,10 @@ static adc_cali_handle_t adc1_cali_handle = NULL;
 
 // Custom functions
 static void i2c_bus_init(void);
-static esp_err_t bme280_init(void);
+static esp_err_t bme280_forced_mode_init(void);
+static void bme280_init(void);
 static void battery_adc_init(void);
+static void nvs_init(void);
 static void bme280_read(float *temp, float *hum, float *pres);
 static void battery_adc_read(int *voltage_mv);
 
@@ -38,14 +42,9 @@ void app_main(void)
 {
     ESP_LOGI(TAG, "System starting...");
 
+    nvs_init();
     i2c_bus_init();
-
-    if (bme280_init() != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to initialize BME280!");
-        return;
-    }
-    ESP_LOGI(TAG, "BME280 initialized.");
-
+    bme280_init();
     battery_adc_init();
 
     float temperature, humidity, pressure;
@@ -83,7 +82,7 @@ static void i2c_bus_init(void) {
  * @brief Initialize BME280 Sensor (Forced Mode)
  * Reuse core steps from bme280_default_init but switch to Forced Mode.
  */
-static esp_err_t bme280_init(void) {
+static esp_err_t bme280_forced_mode_init(void) {
     bme280_sensor = bme280_create(i2c_bus, BME280_I2C_ADDRESS_DEFAULT); // Address 0x76
     if (bme280_sensor == NULL) {
         return ESP_FAIL;
@@ -127,6 +126,15 @@ static esp_err_t bme280_init(void) {
 }
 
 /**
+ * @brief Initialize BME280 Sensor (Forced Mode) with error handling
+ * (Specifically used in this project)
+ */
+static void bme280_init(void) {
+    ESP_ERROR_CHECK(bme280_forced_mode_init());
+    ESP_LOGI(TAG, "BME280 initialized.");
+}
+
+/**
  * @brief Initialize ADC (with Calibration) for Battery Voltage Monitoring
  */
 static void battery_adc_init(void) {
@@ -153,6 +161,26 @@ static void battery_adc_init(void) {
     ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&cali_config, &adc1_cali_handle));
 
     ESP_LOGI(TAG, "ADC initialized.");
+}
+
+/**
+ * @brief Initialize Non-Volatile Storage (NVS)
+ * (Required by Zigbee stack)
+ */
+static void nvs_init(void)
+{
+    esp_err_t ret = nvs_flash_init();
+
+    // If NVS partition is full or has a version mismatch, erase and re-init
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_LOGW(TAG, "NVS partition is full or corrupted, erasing...");
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        ret = nvs_flash_init();
+    }
+
+    // Check for other initialization errors
+    ESP_ERROR_CHECK(ret);
+    ESP_LOGI(TAG, "NVS initialized successfully.");
 }
 
 /**

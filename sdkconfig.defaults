@@ -3,3 +3,5 @@
     #
     # default:
 CONFIG_IDF_TARGET="esp32h2"
+CONFIG_ZB_ENABLED=y
+CONFIG_ZB_ZED=y
