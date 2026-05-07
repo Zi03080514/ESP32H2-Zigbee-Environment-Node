@@ -8,6 +8,7 @@
 #include "esp_adc/adc_cali.h"
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
+#include "esp_pm.h"
 #include "esp_zigbee_core.h"
 #include "zcl/esp_zigbee_zcl_power_config.h"
 #include "nvs_flash.h"
@@ -22,7 +23,7 @@
 #define ZB_REPORT_MAX_INTERVAL      (10 * 60) // 10 minutes
 #define SENSOR_CHECK_INTERVAL_MS       (60 * 1000)      // 1 minute
 static int16_t  report_temp_threshold  = 50; // 0.5C
-static uint16_t report_hum_threshold   = 300; // 3%
+static uint16_t report_hum_threshold   = 200; // 2%
 static int16_t  report_press_threshold = 1; // 0.1 kPa
 static uint8_t  report_batt_threshold  = 2; // 1%
 
@@ -64,6 +65,14 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 void app_main(void)
 {
     ESP_LOGI(TAG, "System starting...");
+
+    // Configure power management
+    esp_pm_config_t pm_config = {
+        .max_freq_mhz = 96,
+        .min_freq_mhz = 32,
+        .light_sleep_enable = true,
+    };
+    ESP_ERROR_CHECK(esp_pm_configure(&pm_config));
 
     // Initialize hardware
     nvs_init();
@@ -336,10 +345,15 @@ static void esp_zb_task(void *pvParameter) {
         .install_code_policy = false,
         .nwk_cfg.zed_cfg = {
             .ed_timeout = ESP_ZB_ED_AGING_TIMEOUT_64MIN,
-            .keep_alive = 3000,
+            .keep_alive = 60000,
         },
     };
     esp_zb_init(&zb_nwk_cfg);
+
+    // Configure Zigbee sleep
+    esp_zb_set_rx_on_when_idle(false);
+    esp_zb_sleep_enable(true);
+    esp_zb_sleep_set_threshold(2000);
 
     // Create cluster list
     esp_zb_cluster_list_t *cluster_list = esp_zb_zcl_cluster_list_create();
@@ -432,7 +446,6 @@ static void sensor_task(void *pvParameters) {
                                      ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
                                      &zcl_temp, false);
 
-
         // Update Humidity
         uint16_t zcl_hum = (uint16_t)(hum * 100);
         esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
@@ -496,6 +509,11 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                 ESP_LOGW(TAG, "Network steering failed, retrying in 1s");
                 esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
             }
+            break;
+        case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP:
+            // Handle Zigbee sleep
+            ESP_LOGI(TAG, "Zigbee stack indicates it can sleep now");
+            esp_zb_sleep_now();
             break;
         default:
             break;
