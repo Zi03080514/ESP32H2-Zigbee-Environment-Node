@@ -19,13 +19,13 @@
 #define ZB_MODEL_IDENTIFIER "\x07""TML-EN1"
 
 // Zigbee reporting logic configuration
-#define ZB_REPORT_MIN_INTERVAL      10 // 10 seconds
+#define ZB_REPORT_MIN_INTERVAL      30 // 30 seconds
 #define ZB_REPORT_MAX_INTERVAL      (10 * 60) // 10 minutes
 #define SENSOR_CHECK_INTERVAL_MS       (60 * 1000)      // 1 minute
-static int16_t  report_temp_threshold  = 50; // 0.5C
-static uint16_t report_hum_threshold   = 200; // 2%
+static int16_t  report_temp_threshold  = 20; // 0.2C
+static uint16_t report_hum_threshold   = 300; // 3%
 static int16_t  report_press_threshold = 1; // 0.1 kPa
-static uint8_t  report_batt_threshold  = 2; // 1%
+static uint8_t  report_batt_threshold  = 4; // 2%
 
 // I2C configuration
 #define I2C_MASTER_SDA_IO 10
@@ -51,13 +51,18 @@ static esp_err_t bme280_forced_mode_init(void);
 static void bme280_init(void);
 static void battery_adc_init(void);
 static void nvs_init(void);
+
 static void bme280_read(float *temp, float *hum, float *press);
 static void battery_adc_read(int *voltage_mv);
 uint8_t calc_battery_percentage(uint32_t voltage_mv);
 
+static void one_time_sensor_task(void *pvParameters);
+static void sensor_task_trigger_cb(uint8_t param);
+
 static void zb_configure_reporting(void);
+static void bind_cb(esp_zb_zdp_status_t zdo_status, void *user_ctx);
+static void zb_configure_binding(void);
 static void esp_zb_task(void *pvParameter);
-static void sensor_task(void *pvParameters);
 void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct);
 static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id, const void *message);
 
@@ -83,8 +88,8 @@ void app_main(void)
     // Create Zigbee stack task
     xTaskCreate(esp_zb_task, "Zigbee_task", 4096, NULL, 5, NULL);
 
-    // Create sensor task
-    xTaskCreate(sensor_task, "sensor_task", 4096, NULL, 3, NULL);
+    // Set up scheduled sensor task
+    esp_zb_scheduler_alarm((esp_zb_callback_t)sensor_task_trigger_cb, 0, 2000);
 
 }
 
@@ -275,9 +280,11 @@ uint8_t calc_battery_percentage(uint32_t voltage_mv) {
 static void zb_configure_reporting(void) {
     esp_zb_zcl_config_report_cmd_t report_cmd = {0};
     report_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
-    report_cmd.zcl_basic_cmd.dst_addr_u.addr_short = 0x0000; // Destination: Coordinator
+    report_cmd.zcl_basic_cmd.dst_addr_u.addr_short = esp_zb_get_short_address();
     report_cmd.zcl_basic_cmd.src_endpoint = ZB_ENDPOINT;
-    report_cmd.zcl_basic_cmd.dst_endpoint = 1;
+    report_cmd.zcl_basic_cmd.dst_endpoint = ZB_ENDPOINT;
+
+    esp_zb_lock_acquire(portMAX_DELAY);
 
     // Temperature Reporting
     report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT;
@@ -332,7 +339,50 @@ static void zb_configure_reporting(void) {
     report_cmd.record_field = &batt_record;
     esp_zb_zcl_config_report_cmd_req(&report_cmd);
 
+    esp_zb_lock_release();
+
     ESP_LOGI(TAG, "Automatic reporting configured.");
+}
+
+/**
+ * @brief Zigbee Bind Callback
+ */
+static void bind_cb(esp_zb_zdp_status_t zdo_status, void *user_ctx) {
+    if (zdo_status == ESP_ZB_ZDP_STATUS_SUCCESS) {
+        ESP_LOGI(TAG, "Bind success!");
+    } else {
+        ESP_LOGW(TAG, "Bind failed with status: 0x%02x", zdo_status);
+    }
+}
+
+/**
+ * @brief Bind All Zigbee Clusters to Coordinator
+ */
+static void zb_configure_binding(void) {
+    esp_zb_zdo_bind_req_param_t bind_req = {0};
+
+    // Basic information
+    esp_zb_get_long_address(bind_req.src_address);
+    bind_req.src_endp = ZB_ENDPOINT;
+    bind_req.dst_addr_mode = ESP_ZB_ZDO_BIND_DST_ADDR_MODE_64_BIT_EXTENDED;
+
+    // Get the address of Coordinator
+    esp_zb_ieee_address_by_short(0x0000, bind_req.dst_address_u.addr_long);
+
+    // Bind all clusters
+    uint16_t clusters_to_bind[] = {
+        ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+        ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+        ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG
+    };
+
+    for (int i = 0; i < sizeof(clusters_to_bind)/sizeof(uint16_t); i++) {
+        bind_req.cluster_id = clusters_to_bind[i];
+        esp_zb_zdo_device_bind_req(&bind_req, bind_cb, NULL);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGI(TAG, "Binding configured.");
 }
 
 /**
@@ -426,47 +476,60 @@ static void esp_zb_task(void *pvParameter) {
 }
 
 /**
- * @brief Sensor & Logic Task
+ * @brief Sensor & Logic Task (Single Time)
  */
-static void sensor_task(void *pvParameters) {
-    while (1) {
-        float temp, hum, press;
-        int battery_voltage;
+static void one_time_sensor_task(void *pvParameters) {
+    float temp, hum, press;
+    int battery_voltage;
 
-        bme280_read(&temp, &hum, &press);
-        battery_adc_read(&battery_voltage);
-        battery_voltage *= 2; // Restore to the actual battery voltage
-        uint8_t battery_percentage = calc_battery_percentage(battery_voltage);
-        ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%", temp, hum, press/10, battery_percentage);
+    bme280_read(&temp, &hum, &press);
+    battery_adc_read(&battery_voltage);
+    battery_voltage *= 2; // Restore to the actual battery voltage
+    uint8_t battery_percentage = calc_battery_percentage(battery_voltage);
+    ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%", temp, hum, press/10, battery_percentage);
 
-        // Update Zigbee attributes.
-        // Update Temperature
-        int16_t zcl_temp = (int16_t)(temp * 100);
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-                                     &zcl_temp, false);
+    // Update Zigbee attributes.
+    // Update Temperature
+    int16_t zcl_temp = (int16_t)(temp * 100);
+    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+                                 &zcl_temp, false);
 
-        // Update Humidity
-        uint16_t zcl_hum = (uint16_t)(hum * 100);
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                                     &zcl_hum, false);
+    // Update Humidity
+    uint16_t zcl_hum = (uint16_t)(hum * 100);
+    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
+                                 &zcl_hum, false);
 
-        // Update Pressure
-        int16_t zcl_press = (int16_t)press;
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
-                                     &zcl_press, false);
+    // Update Pressure
+    int16_t zcl_press = (int16_t)press;
+    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
+                                 &zcl_press, false);
 
-        // Update Battery (Simple 10-step logic)
-        uint8_t zcl_batt = battery_percentage * 2;
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-                                     &zcl_batt, false);
+    // Update Battery (Simple 10-step logic)
+    uint8_t zcl_batt = battery_percentage * 2;
+    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+                                 &zcl_batt, false);
 
-        vTaskDelay(pdMS_TO_TICKS(SENSOR_CHECK_INTERVAL_MS));
+    // Trigger Zigbee stack iteration
+    esp_zb_stack_main_loop_iteration();
 
-    }
+    // Task finished
+    ESP_LOGI(TAG, "Sensor task finished, deleting...");
+    vTaskDelete(NULL);
+}
+
+/**
+ * @brief Sensor Task Timed Callback
+ */
+static void sensor_task_trigger_cb(uint8_t param) {
+    // Perform one time sensor task
+    xTaskCreate(one_time_sensor_task, "sensor_task", 4096, NULL, 3, NULL);
+
+    // Schedule next task
+    esp_zb_scheduler_alarm((esp_zb_callback_t)sensor_task_trigger_cb, 0, SENSOR_CHECK_INTERVAL_MS);
 }
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask) {
@@ -486,14 +549,14 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
 
     switch (sig_type) {
         case ESP_ZB_ZDO_SIGNAL_SKIP_STARTUP:
-            ESP_LOGI(TAG, "Initialize Zigbee stack");
+            ESP_LOGI(TAG, "Initialize Zigbee stack.");
             esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_INITIALIZATION);
             break;
         case ESP_ZB_BDB_SIGNAL_DEVICE_FIRST_START:
         case ESP_ZB_BDB_SIGNAL_DEVICE_REBOOT:
             if (err_status == ESP_OK) {
                 if (esp_zb_bdb_is_factory_new()) {
-                    ESP_LOGI(TAG, "Device is factory new, start network steering");
+                    ESP_LOGI(TAG, "Device is factory new, start network steering...");
                     esp_zb_bdb_start_top_level_commissioning(ESP_ZB_BDB_MODE_NETWORK_STEERING);
                 } else {
                     ESP_LOGI(TAG, "Device rebooted, already in network.");
@@ -503,16 +566,17 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
             break;
         case ESP_ZB_BDB_SIGNAL_STEERING:
             if (err_status == ESP_OK) {
-                ESP_LOGI(TAG, "Joined network successfully");
+                ESP_LOGI(TAG, "Joined network successfully.");
                 zb_configure_reporting();
+                zb_configure_binding();
             } else {
-                ESP_LOGW(TAG, "Network steering failed, retrying in 1s");
+                ESP_LOGW(TAG, "Network steering failed, retrying in 1s.");
                 esp_zb_scheduler_alarm((esp_zb_callback_t)bdb_start_top_level_commissioning_cb, ESP_ZB_BDB_MODE_NETWORK_STEERING, 1000);
             }
             break;
         case ESP_ZB_COMMON_SIGNAL_CAN_SLEEP:
             // Handle Zigbee sleep
-            ESP_LOGI(TAG, "Zigbee stack indicates it can sleep now");
+            ESP_LOGI(TAG, "Zigbee stack indicates it can sleep now.");
             esp_zb_sleep_now();
             break;
         default:
@@ -528,13 +592,13 @@ static esp_err_t zb_action_handler(esp_zb_core_action_callback_id_t callback_id,
 
     switch (callback_id) {
         case ESP_ZB_CORE_SET_ATTR_VALUE_CB_ID:
-            ESP_LOGI(TAG, "Receive ZCL set attribute request");
+            ESP_LOGI(TAG, "Receive ZCL set attribute request.");
             break;
         case ESP_ZB_CORE_CMD_DEFAULT_RESP_CB_ID:
-            ESP_LOGI(TAG, "Receive ZCL command default response");
+            ESP_LOGI(TAG, "Receive ZCL command default response.");
             break;
         default:
-            ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback", callback_id);
+            ESP_LOGW(TAG, "Receive Zigbee action(0x%x) callback.", callback_id);
             break;
     }
     return ret;
