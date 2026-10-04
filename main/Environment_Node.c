@@ -19,7 +19,7 @@
 #define ZB_MODEL_IDENTIFIER "\x07""TML-EN1"
 
 // Zigbee reporting logic configuration
-#define ZB_REPORT_MIN_INTERVAL      30 // 30 seconds
+#define ZB_REPORT_MIN_INTERVAL      60 // 60 seconds
 #define ZB_REPORT_MAX_INTERVAL      (10 * 60) // 10 minutes
 #define SENSOR_CHECK_INTERVAL_MS       (60 * 1000)      // 1 minute
 static int16_t  report_temp_threshold  = 20; // 0.2C
@@ -35,6 +35,7 @@ static uint8_t  report_batt_threshold  = 4; // 2%
 
 // ADC configuration
 #define BATTERY_ADC_CHANNEL ADC_CHANNEL_0 // GPIO 1
+#define BATTERY_ADC_DIVISION_FACTOR 2
 
 // Define the tag for logs
 static const char *TAG = "TML_EN1";
@@ -185,7 +186,7 @@ static void battery_adc_init(void) {
     // ADC Calibration Setup
     adc_cali_curve_fitting_config_t cali_config = {
         .unit_id = ADC_UNIT_1,
-        .chan = BATTERY_ADC_CHANNEL,      // Important: Specific to the structure you found
+        .chan = BATTERY_ADC_CHANNEL,
         .atten = ADC_ATTEN_DB_12,
         .bitwidth = ADC_BITWIDTH_DEFAULT,
     };
@@ -440,7 +441,7 @@ static void esp_zb_task(void *pvParameter) {
     // Create pressure sensor cluster
     esp_zb_pressure_meas_cluster_cfg_t press_cfg = {
         .min_value = 300,  // 30.0 kPa
-        .max_value = 1100, // 110.0 hPa
+        .max_value = 1100, // 110.0 kPa
     };
     esp_zb_cluster_list_add_pressure_meas_cluster(cluster_list,
         esp_zb_pressure_meas_cluster_create(&press_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
@@ -484,7 +485,7 @@ static void one_time_sensor_task(void *pvParameters) {
 
     bme280_read(&temp, &hum, &press);
     battery_adc_read(&battery_voltage);
-    battery_voltage *= 2; // Restore to the actual battery voltage
+    battery_voltage *= BATTERY_ADC_DIVISION_FACTOR; // Restore to the actual battery voltage
     uint8_t battery_percentage = calc_battery_percentage(battery_voltage);
     ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%", temp, hum, press/10, battery_percentage);
 
