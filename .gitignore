@@ -78,3 +78,7 @@ Desktop.ini
 *.sln.docstates # Visual Studio
 
 .idea/
+.vscode/
+
+# Local hardware and project configuration
+main/config.h

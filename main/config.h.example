@@ -1,0 +1,85 @@
+#pragma once
+
+#include "esp_zigbee_core.h"
+#include "esp_adc/adc_oneshot.h"
+
+// ==========================================
+// Sensor Hardware Modules (1: Enable, 0: Disable)
+// ==========================================
+#define ENABLE_BME280                   1   // Temperature, Humidity, Pressure sensor
+#define ENABLE_BH1750                   1   // Ambient Light (Illuminance) sensor
+#define ENABLE_SCD41                    1   // Sensirion CO2 sensor
+
+// ==========================================
+// Zigbee Device Configuration
+// ==========================================
+#define ZB_ENDPOINT                     1
+#define ZB_MANUFACTURER_NAME            "\x0C""Thingsmaking"
+#define ZB_MODEL_IDENTIFIER             "\x07""TML-EN1"
+#define ZB_PRIMARY_CHANNEL              11  // Zigbee Channel (11-26)
+#define ZB_ED_AGING_TIMEOUT             ESP_ZB_ED_AGING_TIMEOUT_64MIN
+#define ZB_ED_KEEP_ALIVE_MS             60000
+#define ZB_SLEEP_THRESHOLD_MS           2000
+
+// ==========================================
+// Hardware Pinout & Bus Configuration
+// ==========================================
+// I2C Master Bus
+#define I2C_MASTER_SDA_IO               10
+#define I2C_MASTER_SCL_IO               11
+#define I2C_MASTER_NUM                  I2C_NUM_0
+#define I2C_MASTER_FREQ_HZ              100000
+
+// I2C Device Addresses
+#define BME280_I2C_ADDR                 0x76 // BME280 address (0x76 or 0x77)
+#define BH1750_I2C_ADDR                 0x23 // BH1750 address (0x23 if ADDR->GND, 0x5C if ADDR->VCC)
+#define SCD41_I2C_ADDR                  0x62 // SCD41 fixed address
+
+// Battery Voltage ADC
+#define BATTERY_ADC_CHANNEL             ADC_CHANNEL_0 // GPIO 1
+#define BATTERY_ADC_DIVISION_FACTOR     2             // Voltage divider factor (10k / 10k)
+
+// ==========================================
+// Sensor Sampling Intervals (in seconds)
+// ==========================================
+// Regular sensors (BME280, BH1750, Battery)
+#define SENSOR_CHECK_INTERVAL_S         120
+
+// SCD41 CO2 sensor (low-frequency power saving, e.g. 300s = 5 min)
+#define SCD41_CHECK_INTERVAL_S          600
+
+// Number of regular sensor cycles per SCD41 measurement
+#if (SCD41_CHECK_INTERVAL_S < SENSOR_CHECK_INTERVAL_S)
+#define SCD41_SAMPLE_CYCLES             1
+#else
+#define SCD41_SAMPLE_CYCLES             (SCD41_CHECK_INTERVAL_S / SENSOR_CHECK_INTERVAL_S)
+#endif
+
+// ==========================================
+// Zigbee Reporting Intervals (in seconds)
+// ==========================================
+// Regular sensors (min interval equals sampling interval)
+#define ZB_REPORT_MIN_INTERVAL_S        SENSOR_CHECK_INTERVAL_S
+#define ZB_REPORT_MAX_INTERVAL_S        (10 * 60) // 10 minutes
+
+// SCD41 CO2 reporting (min interval equals SCD41 sampling interval)
+#define ZB_REPORT_CO2_MIN_INTERVAL_S    SCD41_CHECK_INTERVAL_S
+#define ZB_REPORT_CO2_MAX_INTERVAL_S    (30 * 60) // 30 minutes
+
+// ==========================================
+// Reporting Delta Thresholds (Reportable Change)
+// ==========================================
+#define REPORT_TEMP_THRESHOLD           20        // 0.20 °C (0.01 °C resolution)
+#define REPORT_HUM_THRESHOLD            300       // 3.00 %RH (0.01 % resolution)
+#define REPORT_PRESS_THRESHOLD          1         // 0.1 kPa (0.1 kPa resolution)
+#define REPORT_BATT_THRESHOLD           4         // 2% remaining (0.5% resolution: 4 * 0.5% = 2%)
+#define REPORT_ILLUM_THRESHOLD          1000      // ~0.1 decade change in lux
+#define REPORT_CO2_THRESHOLD            0.000050f // 50 ppm (fraction of 1, e.g. 50 / 1,000,000)
+
+// ==========================================
+// Power Management Configurations
+// ==========================================
+#define PM_MAX_FREQ_MHZ                 96
+#define PM_MIN_FREQ_MHZ                 32
+#define PM_LIGHT_SLEEP_ENABLE           true
+
