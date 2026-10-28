@@ -1,3 +1,3 @@
 idf_component_register(
-        SRCS "Environment_Node.c"
+        SRCS "main.c"
         INCLUDE_DIRS ".")
