@@ -3,10 +3,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "i2c_bus.h"
-#include "bme280.h"
-#include "esp_adc/adc_oneshot.h"
-#include "esp_adc/adc_cali.h"
-#include "esp_adc/adc_cali_scheme.h"
 #include "esp_log.h"
 #include "esp_pm.h"
 #include "esp_zigbee_core.h"
@@ -19,31 +15,26 @@
 #include "config.h.example"
 #endif
 
+#include "sensor_bme280.h"
+#include "battery.h"
+
 // Define the tag for logs
 static const char *TAG = "TML_EN1";
 
 // Reporting thresholds from config
+#if ENABLE_BME280
 static int16_t  report_temp_threshold  = REPORT_TEMP_THRESHOLD;
 static uint16_t report_hum_threshold   = REPORT_HUM_THRESHOLD;
 static int16_t  report_press_threshold = REPORT_PRESS_THRESHOLD;
+#endif
 static uint8_t  report_batt_threshold  = REPORT_BATT_THRESHOLD;
 
 // Global handles
-static bme280_handle_t bme280_sensor = NULL;
 static i2c_bus_handle_t i2c_bus = NULL;
-static adc_oneshot_unit_handle_t adc1_handle;
-static adc_cali_handle_t adc1_cali_handle = NULL;
 
 // Custom functions
 static void i2c_bus_init(void);
-static esp_err_t bme280_forced_mode_init(void);
-static void bme280_init(void);
-static void battery_adc_init(void);
 static void nvs_init(void);
-
-static void bme280_read(float *temp, float *hum, float *press);
-static void battery_adc_read(int *voltage_mv);
-static uint8_t calc_battery_percentage(uint32_t voltage_mv);
 
 static void one_time_sensor_task(void *pvParameters);
 static void sensor_task_trigger_cb(uint8_t param);
@@ -70,8 +61,10 @@ void app_main(void)
     // Initialize hardware
     nvs_init();
     i2c_bus_init();
-    bme280_init();
-    battery_adc_init();
+#if ENABLE_BME280
+    sensor_bme280_init(i2c_bus);
+#endif
+    battery_init();
 
     // Create Zigbee stack task
     xTaskCreate(esp_zb_task, "Zigbee_task", 4096, NULL, 5, NULL);
@@ -80,9 +73,6 @@ void app_main(void)
     esp_zb_scheduler_alarm((esp_zb_callback_t)sensor_task_trigger_cb, 0, 2000);
 }
 
-/**
- * @brief Initialize I2C Bus
- */
 static void i2c_bus_init(void) {
     i2c_config_t conf = {
         .mode = I2C_MODE_MASTER,
@@ -94,79 +84,6 @@ static void i2c_bus_init(void) {
     };
     i2c_bus = i2c_bus_create(I2C_MASTER_NUM, &conf);
     ESP_LOGI(TAG, "I2C Bus initialized.");
-}
-
-/**
- * @brief Initialize BME280 Sensor (Forced Mode)
- */
-static esp_err_t bme280_forced_mode_init(void) {
-    bme280_sensor = bme280_create(i2c_bus, BME280_I2C_ADDR);
-    if (bme280_sensor == NULL) {
-        return ESP_FAIL;
-    }
-
-    uint8_t chipid = 0;
-    bme280_dev_t *sens = (bme280_dev_t *) bme280_sensor;
-    if (i2c_bus_read_byte(sens->i2c_dev, BME280_REGISTER_CHIPID, &chipid) != ESP_OK) {
-        ESP_LOGI("BME280:", "bme280_default_init->bme280_read_byte ->BME280_REGISTER_CHIPID failed!!!!:%x", chipid);
-        return ESP_FAIL;
-    }
-    if (chipid != BME280_DEFAULT_CHIPID) {
-        ESP_LOGI("BME280:", "bme280_default_init->BME280_DEFAULT_CHIPID:%x", chipid);
-        return ESP_FAIL;
-    }
-
-    if (i2c_bus_write_byte(sens->i2c_dev, BME280_REGISTER_SOFTRESET, 0xB6) != ESP_OK) {
-        return ESP_FAIL;
-    }
-
-    vTaskDelay(pdMS_TO_TICKS(300));
-    while (bme280_is_reading_calibration(bme280_sensor)) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-
-    if (bme280_read_coefficients(bme280_sensor) != ESP_OK) {
-        return ESP_FAIL;
-    }
-
-    if (bme280_set_sampling(bme280_sensor,
-                            BME280_MODE_FORCED,
-                            BME280_SAMPLING_X16,
-                            BME280_SAMPLING_X16,
-                            BME280_SAMPLING_X16,
-                            BME280_FILTER_OFF,
-                            BME280_STANDBY_MS_0_5) != ESP_OK) {
-        return ESP_FAIL;
-    }
-    return ESP_OK;
-}
-
-static void bme280_init(void) {
-    ESP_ERROR_CHECK(bme280_forced_mode_init());
-    ESP_LOGI(TAG, "BME280 initialized.");
-}
-
-static void battery_adc_init(void) {
-    adc_oneshot_unit_init_cfg_t init_config1 = {
-        .unit_id = ADC_UNIT_1,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_new_unit(&init_config1, &adc1_handle));
-
-    adc_oneshot_chan_cfg_t config = {
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-        .atten = ADC_ATTEN_DB_12,
-    };
-    ESP_ERROR_CHECK(adc_oneshot_config_channel(adc1_handle, BATTERY_ADC_CHANNEL, &config));
-
-    adc_cali_curve_fitting_config_t cali_config = {
-        .unit_id = ADC_UNIT_1,
-        .chan = BATTERY_ADC_CHANNEL,
-        .atten = ADC_ATTEN_DB_12,
-        .bitwidth = ADC_BITWIDTH_DEFAULT,
-    };
-    ESP_ERROR_CHECK(adc_cali_create_scheme_curve_fitting(&cali_config, &adc1_cali_handle));
-
-    ESP_LOGI(TAG, "ADC initialized.");
 }
 
 static void nvs_init(void)
@@ -181,51 +98,6 @@ static void nvs_init(void)
     ESP_LOGI(TAG, "NVS initialized successfully.");
 }
 
-static void bme280_read(float *temp, float *hum, float *press) {
-    ESP_ERROR_CHECK(bme280_take_forced_measurement(bme280_sensor));
-    vTaskDelay(pdMS_TO_TICKS(150));
-    bme280_read_temperature(bme280_sensor, temp);
-    bme280_read_humidity(bme280_sensor, hum);
-    bme280_read_pressure(bme280_sensor, press);
-}
-
-static void battery_adc_read(int *voltage_mv) {
-    int adc_raw;
-    ESP_ERROR_CHECK(adc_oneshot_read(adc1_handle, BATTERY_ADC_CHANNEL, &adc_raw));
-    ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc1_cali_handle, adc_raw, voltage_mv));
-}
-
-static uint8_t calc_battery_percentage(uint32_t voltage_mv) {
-    static const struct {
-        uint16_t mv;
-        uint8_t pct;
-    } curve[] = {
-        {3200, 0},   {3400, 10},  {3600, 20},
-        {3700, 40},  {3800, 60},  {3900, 80},
-        {4000, 90},  {4200, 100}
-    };
-
-    const int num_points = sizeof(curve) / sizeof(curve[0]);
-
-    if (voltage_mv <= curve[0].mv) {
-        return 0;
-    }
-    if (voltage_mv >= curve[num_points - 1].mv) {
-        return 100;
-    }
-
-    for (int i = 0; i < num_points - 1; i++) {
-        if (voltage_mv >= curve[i].mv && voltage_mv <= curve[i + 1].mv) {
-            uint32_t v_range = curve[i + 1].mv - curve[i].mv;
-            uint32_t p_range = curve[i + 1].pct - curve[i].pct;
-
-            return curve[i].pct +
-                   ((voltage_mv - curve[i].mv) * p_range) / v_range;
-        }
-    }
-    return 0;
-}
-
 static void zb_configure_reporting(void) {
     esp_zb_zcl_config_report_cmd_t report_cmd = {0};
     report_cmd.address_mode = ESP_ZB_APS_ADDR_MODE_16_ENDP_PRESENT;
@@ -235,6 +107,7 @@ static void zb_configure_reporting(void) {
 
     esp_zb_lock_acquire(portMAX_DELAY);
 
+#if ENABLE_BME280
     // Temperature Reporting
     report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT;
     esp_zb_zcl_config_report_record_t temp_record = {
@@ -274,6 +147,7 @@ static void zb_configure_reporting(void) {
     };
     report_cmd.record_field = &press_record;
     esp_zb_zcl_config_report_cmd_req(&report_cmd);
+#endif
 
     // Battery Reporting
     report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG;
@@ -309,10 +183,12 @@ static void zb_configure_binding(void) {
     esp_zb_ieee_address_by_short(0x0000, bind_req.dst_address_u.addr_long);
 
     uint16_t clusters_to_bind[] = {
+        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
+#if ENABLE_BME280
         ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
         ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
         ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
-        ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG
+#endif
     };
 
     for (int i = 0; i < sizeof(clusters_to_bind)/sizeof(uint16_t); i++) {
@@ -350,6 +226,15 @@ static void esp_zb_task(void *pvParameter) {
     esp_zb_basic_cluster_add_attr(basic_attr_list, ESP_ZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, ZB_MODEL_IDENTIFIER);
     esp_zb_cluster_list_add_basic_cluster(cluster_list, basic_attr_list, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 
+    // Create power cluster
+    esp_zb_attribute_list_t *power_cfg_cluster = esp_zb_power_config_cluster_create(NULL);
+    uint8_t battery_percentage = 200;
+    esp_zb_power_config_cluster_add_attr(power_cfg_cluster,
+                            ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
+                            &battery_percentage);
+    esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_cfg_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+
+#if ENABLE_BME280
     // Create temperature sensor cluster
     esp_zb_temperature_meas_cluster_cfg_t temp_cfg = {
         .min_value = -1000,
@@ -373,14 +258,7 @@ static void esp_zb_task(void *pvParameter) {
     };
     esp_zb_cluster_list_add_pressure_meas_cluster(cluster_list,
         esp_zb_pressure_meas_cluster_create(&press_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
-
-    // Create power cluster
-    esp_zb_attribute_list_t *power_cfg_cluster = esp_zb_power_config_cluster_create(NULL);
-    uint8_t battery_percentage = 200;
-    esp_zb_power_config_cluster_add_attr(power_cfg_cluster,
-                            ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
-                            &battery_percentage);
-    esp_zb_cluster_list_add_power_config_cluster(cluster_list, power_cfg_cluster, ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+#endif
 
     // Create endpoint
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
@@ -401,29 +279,39 @@ static void esp_zb_task(void *pvParameter) {
 }
 
 static void one_time_sensor_task(void *pvParameters) {
-    float temp, hum, press;
-    int battery_voltage;
+#if ENABLE_BME280
+    float temp = 0.0f, hum = 0.0f, press = 0.0f;
+    esp_err_t bme_err = sensor_bme280_trigger();
+    vTaskDelay(pdMS_TO_TICKS(150));
 
-    bme280_read(&temp, &hum, &press);
-    battery_adc_read(&battery_voltage);
-    battery_voltage *= BATTERY_ADC_DIVISION_FACTOR;
-    uint8_t battery_percentage = calc_battery_percentage(battery_voltage);
-    ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%", temp, hum, press/10, battery_percentage);
+    if (bme_err == ESP_OK && sensor_bme280_read(&temp, &hum, &press) == ESP_OK) {
+        int16_t zcl_temp = (int16_t)(temp * 100);
+        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+                                     &zcl_temp, false);
 
-    int16_t zcl_temp = (int16_t)(temp * 100);
-    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-                                 &zcl_temp, false);
+        uint16_t zcl_hum = (uint16_t)(hum * 100);
+        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
+                                     &zcl_hum, false);
 
-    uint16_t zcl_hum = (uint16_t)(hum * 100);
-    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                                 &zcl_hum, false);
+        int16_t zcl_press = (int16_t)press;
+        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
+                                     &zcl_press, false);
+    } else {
+        ESP_LOGW(TAG, "BME280 measurement skipped or failed");
+    }
+#endif
 
-    int16_t zcl_press = (int16_t)press;
-    esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
-                                 ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
-                                 &zcl_press, false);
+    int battery_voltage = 0;
+    uint8_t battery_percentage = 0;
+    battery_read(&battery_voltage, &battery_percentage);
+#if ENABLE_BME280
+    ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%", temp, hum, press/10.0f, battery_percentage);
+#else
+    ESP_LOGI(TAG, "Readings: Bat: %d %%", battery_percentage);
+#endif
 
     uint8_t zcl_batt = battery_percentage * 2;
     esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG,
