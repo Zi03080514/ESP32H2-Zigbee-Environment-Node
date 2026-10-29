@@ -18,6 +18,7 @@
 
 #include "sensor_bme280.h"
 #include "sensor_bh1750.h"
+#include "sensor_scd41.h"
 #include "battery.h"
 
 // Define the tag for logs
@@ -46,6 +47,9 @@ static int16_t  report_press_threshold = REPORT_PRESS_THRESHOLD;
 #endif
 #if ENABLE_BH1750
 static uint16_t report_illum_threshold = REPORT_ILLUM_THRESHOLD;
+#endif
+#if ENABLE_SCD41
+static float    report_co2_threshold   = REPORT_CO2_THRESHOLD;
 #endif
 static uint8_t  report_batt_threshold  = REPORT_BATT_THRESHOLD;
 
@@ -86,6 +90,9 @@ void app_main(void)
 #endif
 #if ENABLE_BH1750
     sensor_bh1750_init(i2c_bus);
+#endif
+#if ENABLE_SCD41
+    sensor_scd41_init(i2c_bus);
 #endif
     battery_init();
 
@@ -187,6 +194,21 @@ static void zb_configure_reporting(void) {
     esp_zb_zcl_config_report_cmd_req(&report_cmd);
 #endif
 
+#if ENABLE_SCD41
+    // Carbon Dioxide Reporting
+    report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_CARBON_DIOXIDE_MEASUREMENT;
+    esp_zb_zcl_config_report_record_t co2_record = {
+        .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .attributeID = ESP_ZB_ZCL_ATTR_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_ID,
+        .attrType = ESP_ZB_ZCL_ATTR_TYPE_SINGLE,
+        .min_interval = ZB_REPORT_SCD41_MIN_INTERVAL_S,
+        .max_interval = ZB_REPORT_SCD41_MAX_INTERVAL_S,
+        .reportable_change = &report_co2_threshold,
+    };
+    report_cmd.record_field = &co2_record;
+    esp_zb_zcl_config_report_cmd_req(&report_cmd);
+#endif
+
     // Battery Reporting
     report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_POWER_CONFIG;
     esp_zb_zcl_config_report_record_t batt_record = {
@@ -229,6 +251,9 @@ static void zb_configure_binding(void) {
 #endif
 #if ENABLE_BH1750
         ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
+#endif
+#if ENABLE_SCD41
+        ESP_ZB_ZCL_CLUSTER_ID_CARBON_DIOXIDE_MEASUREMENT,
 #endif
     };
 
@@ -312,6 +337,17 @@ static void esp_zb_task(void *pvParameter) {
         esp_zb_illuminance_meas_cluster_create(&illum_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 #endif
 
+#if ENABLE_SCD41
+    // Create CO2 sensor cluster
+    esp_zb_carbon_dioxide_measurement_cluster_cfg_t co2_cfg = {
+        .measured_value = 0.000400f,     // 400 ppm
+        .min_measured_value = 0.000400f, // 400 ppm
+        .max_measured_value = 0.040000f, // 40000 ppm
+    };
+    esp_zb_cluster_list_add_carbon_dioxide_measurement_cluster(cluster_list,
+        esp_zb_carbon_dioxide_measurement_cluster_create(&co2_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+#endif
+
     // Create endpoint
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
     esp_zb_endpoint_config_t ep_config = {
@@ -352,6 +388,18 @@ static void one_time_sensor_task(void *pvParameters) {
     if (do_bh1750) {
         last_bh1750_s = now_s;
         bh_err = sensor_bh1750_trigger();
+    }
+#endif
+
+#if ENABLE_SCD41
+    static int64_t last_scd41_s = -SCD41_CHECK_INTERVAL_S;
+    bool do_scd41 = (now_s - last_scd41_s >= SCD41_CHECK_INTERVAL_S);
+    uint16_t co2_ppm = 0;
+    esp_err_t scd_err = ESP_FAIL;
+    if (do_scd41) {
+        last_scd41_s = now_s;
+        sensor_scd41_wake_up();
+        scd_err = sensor_scd41_trigger();
     }
 #endif
 
@@ -407,6 +455,23 @@ static void one_time_sensor_task(void *pvParameters) {
         } else {
             ESP_LOGW(TAG, "BH1750 measurement skipped or failed");
         }
+    }
+#endif
+
+#if ENABLE_SCD41
+    if (do_scd41) {
+        // SCD41 single-shot takes ~5000 ms. If we waited 180 ms for BME280/BH1750, wait remaining 4820 ms.
+        vTaskDelay(pdMS_TO_TICKS(waited ? 4820 : 5000));
+        if (scd_err == ESP_OK && sensor_scd41_read(&co2_ppm) == ESP_OK) {
+            float zcl_co2 = (float)co2_ppm / 1000000.0f;
+            esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_CARBON_DIOXIDE_MEASUREMENT,
+                                         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_CARBON_DIOXIDE_MEASUREMENT_MEASURED_VALUE_ID,
+                                         &zcl_co2, false);
+            ESP_LOGI(TAG, "Readings: CO2: %u ppm", co2_ppm);
+        } else {
+            ESP_LOGW(TAG, "SCD41 measurement skipped or failed");
+        }
+        sensor_scd41_power_down();
     }
 #endif
 
