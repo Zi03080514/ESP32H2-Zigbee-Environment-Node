@@ -8,6 +8,7 @@
 #include "esp_zigbee_core.h"
 #include "zcl/esp_zigbee_zcl_power_config.h"
 #include "nvs_flash.h"
+#include "esp_timer.h"
 
 #if __has_include("config.h")
 #include "config.h"
@@ -16,16 +17,35 @@
 #endif
 
 #include "sensor_bme280.h"
+#include "sensor_bh1750.h"
 #include "battery.h"
 
 // Define the tag for logs
 static const char *TAG = "TML_EN1";
+
+static uint32_t get_base_interval_s(void) {
+    uint32_t min_s = UINT32_MAX;
+#if ENABLE_BME280
+    if (BME280_CHECK_INTERVAL_S < min_s) min_s = BME280_CHECK_INTERVAL_S;
+#endif
+#if ENABLE_BH1750
+    if (BH1750_CHECK_INTERVAL_S < min_s) min_s = BH1750_CHECK_INTERVAL_S;
+#endif
+#if ENABLE_SCD41
+    if (SCD41_CHECK_INTERVAL_S < min_s) min_s = SCD41_CHECK_INTERVAL_S;
+#endif
+    if (min_s == UINT32_MAX) min_s = 60;
+    return min_s;
+}
 
 // Reporting thresholds from config
 #if ENABLE_BME280
 static int16_t  report_temp_threshold  = REPORT_TEMP_THRESHOLD;
 static uint16_t report_hum_threshold   = REPORT_HUM_THRESHOLD;
 static int16_t  report_press_threshold = REPORT_PRESS_THRESHOLD;
+#endif
+#if ENABLE_BH1750
+static uint16_t report_illum_threshold = REPORT_ILLUM_THRESHOLD;
 #endif
 static uint8_t  report_batt_threshold  = REPORT_BATT_THRESHOLD;
 
@@ -63,6 +83,9 @@ void app_main(void)
     i2c_bus_init();
 #if ENABLE_BME280
     sensor_bme280_init(i2c_bus);
+#endif
+#if ENABLE_BH1750
+    sensor_bh1750_init(i2c_bus);
 #endif
     battery_init();
 
@@ -114,8 +137,8 @@ static void zb_configure_reporting(void) {
         .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
         .attributeID = ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
         .attrType = ESP_ZB_ZCL_ATTR_TYPE_S16,
-        .min_interval = ZB_REPORT_MIN_INTERVAL_S,
-        .max_interval = ZB_REPORT_MAX_INTERVAL_S,
+        .min_interval = ZB_REPORT_BME280_MIN_INTERVAL_S,
+        .max_interval = ZB_REPORT_BME280_MAX_INTERVAL_S,
         .reportable_change = &report_temp_threshold,
     };
     report_cmd.record_number = 1;
@@ -128,8 +151,8 @@ static void zb_configure_reporting(void) {
         .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
         .attributeID = ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
         .attrType = ESP_ZB_ZCL_ATTR_TYPE_U16,
-        .min_interval = ZB_REPORT_MIN_INTERVAL_S,
-        .max_interval = ZB_REPORT_MAX_INTERVAL_S,
+        .min_interval = ZB_REPORT_BME280_MIN_INTERVAL_S,
+        .max_interval = ZB_REPORT_BME280_MAX_INTERVAL_S,
         .reportable_change = &report_hum_threshold,
     };
     report_cmd.record_field = &hum_record;
@@ -141,11 +164,26 @@ static void zb_configure_reporting(void) {
         .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
         .attributeID = ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
         .attrType = ESP_ZB_ZCL_ATTR_TYPE_S16,
-        .min_interval = ZB_REPORT_MIN_INTERVAL_S,
-        .max_interval = ZB_REPORT_MAX_INTERVAL_S,
+        .min_interval = ZB_REPORT_BME280_MIN_INTERVAL_S,
+        .max_interval = ZB_REPORT_BME280_MAX_INTERVAL_S,
         .reportable_change = &report_press_threshold,
     };
     report_cmd.record_field = &press_record;
+    esp_zb_zcl_config_report_cmd_req(&report_cmd);
+#endif
+
+#if ENABLE_BH1750
+    // Illuminance Reporting
+    report_cmd.clusterID = ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT;
+    esp_zb_zcl_config_report_record_t illum_record = {
+        .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
+        .attributeID = ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID,
+        .attrType = ESP_ZB_ZCL_ATTR_TYPE_U16,
+        .min_interval = ZB_REPORT_BH1750_MIN_INTERVAL_S,
+        .max_interval = ZB_REPORT_BH1750_MAX_INTERVAL_S,
+        .reportable_change = &report_illum_threshold,
+    };
+    report_cmd.record_field = &illum_record;
     esp_zb_zcl_config_report_cmd_req(&report_cmd);
 #endif
 
@@ -155,8 +193,8 @@ static void zb_configure_reporting(void) {
         .direction = ESP_ZB_ZCL_REPORT_DIRECTION_SEND,
         .attributeID = ESP_ZB_ZCL_ATTR_POWER_CONFIG_BATTERY_PERCENTAGE_REMAINING_ID,
         .attrType = ESP_ZB_ZCL_ATTR_TYPE_U8,
-        .min_interval = ZB_REPORT_MIN_INTERVAL_S,
-        .max_interval = ZB_REPORT_MAX_INTERVAL_S,
+        .min_interval = ZB_REPORT_BATT_MIN_INTERVAL_S,
+        .max_interval = ZB_REPORT_BATT_MAX_INTERVAL_S,
         .reportable_change = &report_batt_threshold,
     };
     report_cmd.record_field = &batt_record;
@@ -188,6 +226,9 @@ static void zb_configure_binding(void) {
         ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
         ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
         ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+#endif
+#if ENABLE_BH1750
+        ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
 #endif
     };
 
@@ -260,6 +301,17 @@ static void esp_zb_task(void *pvParameter) {
         esp_zb_pressure_meas_cluster_create(&press_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
 #endif
 
+#if ENABLE_BH1750
+    // Create illuminance sensor cluster
+    esp_zb_illuminance_meas_cluster_cfg_t illum_cfg = {
+        .measured_value = 0,
+        .min_value = 0,
+        .max_value = 0xFFFE,
+    };
+    esp_zb_cluster_list_add_illuminance_meas_cluster(cluster_list,
+        esp_zb_illuminance_meas_cluster_create(&illum_cfg), ESP_ZB_ZCL_CLUSTER_SERVER_ROLE);
+#endif
+
     // Create endpoint
     esp_zb_ep_list_t *ep_list = esp_zb_ep_list_create();
     esp_zb_endpoint_config_t ep_config = {
@@ -279,36 +331,114 @@ static void esp_zb_task(void *pvParameter) {
 }
 
 static void one_time_sensor_task(void *pvParameters) {
+    int64_t now_s = esp_timer_get_time() / 1000000ULL;
+
 #if ENABLE_BME280
+    static int64_t last_bme280_s = -BME280_CHECK_INTERVAL_S;
+    bool do_bme280 = (now_s - last_bme280_s >= BME280_CHECK_INTERVAL_S);
     float temp = 0.0f, hum = 0.0f, press = 0.0f;
-    esp_err_t bme_err = sensor_bme280_trigger();
-    vTaskDelay(pdMS_TO_TICKS(150));
+    esp_err_t bme_err = ESP_FAIL;
+    if (do_bme280) {
+        last_bme280_s = now_s;
+        bme_err = sensor_bme280_trigger();
+    }
+#endif
 
-    if (bme_err == ESP_OK && sensor_bme280_read(&temp, &hum, &press) == ESP_OK) {
-        int16_t zcl_temp = (int16_t)(temp * 100);
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
-                                     &zcl_temp, false);
+#if ENABLE_BH1750
+    static int64_t last_bh1750_s = -BH1750_CHECK_INTERVAL_S;
+    bool do_bh1750 = (now_s - last_bh1750_s >= BH1750_CHECK_INTERVAL_S);
+    float lux = 0.0f;
+    esp_err_t bh_err = ESP_FAIL;
+    if (do_bh1750) {
+        last_bh1750_s = now_s;
+        bh_err = sensor_bh1750_trigger();
+    }
+#endif
 
-        uint16_t zcl_hum = (uint16_t)(hum * 100);
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
-                                     &zcl_hum, false);
+    // Wait 180 ms if any sensor was triggered
+    bool waited = false;
+#if ENABLE_BME280
+    if (do_bme280) waited = true;
+#endif
+#if ENABLE_BH1750
+    if (do_bh1750) waited = true;
+#endif
+    if (waited) {
+        vTaskDelay(pdMS_TO_TICKS(180));
+    }
 
-        int16_t zcl_press = (int16_t)press;
-        esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
-                                     ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
-                                     &zcl_press, false);
-    } else {
-        ESP_LOGW(TAG, "BME280 measurement skipped or failed");
+#if ENABLE_BME280
+    if (do_bme280) {
+        if (bme_err == ESP_OK && sensor_bme280_read(&temp, &hum, &press) == ESP_OK) {
+            int16_t zcl_temp = (int16_t)(temp * 100);
+            esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_TEMP_MEASUREMENT,
+                                         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_TEMP_MEASUREMENT_VALUE_ID,
+                                         &zcl_temp, false);
+
+            uint16_t zcl_hum = (uint16_t)(hum * 100);
+            esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_REL_HUMIDITY_MEASUREMENT,
+                                         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_REL_HUMIDITY_MEASUREMENT_VALUE_ID,
+                                         &zcl_hum, false);
+
+            int16_t zcl_press = (int16_t)press;
+            esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_PRESSURE_MEASUREMENT,
+                                         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_PRESSURE_MEASUREMENT_VALUE_ID,
+                                         &zcl_press, false);
+        } else {
+            ESP_LOGW(TAG, "BME280 measurement skipped or failed");
+        }
+    }
+#endif
+
+#if ENABLE_BH1750
+    if (do_bh1750) {
+        if (bh_err == ESP_OK && sensor_bh1750_read(&lux) == ESP_OK) {
+            uint16_t zcl_lux = 0;
+            if (lux >= 1.0f) {
+                float measured = 10000.0f * log10f(lux) + 1.0f;
+                if (measured > 0xFFFE) measured = 0xFFFE;
+                zcl_lux = (uint16_t)measured;
+            } else {
+                zcl_lux = 0;
+            }
+            esp_zb_zcl_set_attribute_val(ZB_ENDPOINT, ESP_ZB_ZCL_CLUSTER_ID_ILLUMINANCE_MEASUREMENT,
+                                         ESP_ZB_ZCL_CLUSTER_SERVER_ROLE, ESP_ZB_ZCL_ATTR_ILLUMINANCE_MEASUREMENT_MEASURED_VALUE_ID,
+                                         &zcl_lux, false);
+        } else {
+            ESP_LOGW(TAG, "BH1750 measurement skipped or failed");
+        }
     }
 #endif
 
     int battery_voltage = 0;
     uint8_t battery_percentage = 0;
     battery_read(&battery_voltage, &battery_percentage);
-#if ENABLE_BME280
-    ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%", temp, hum, press/10.0f, battery_percentage);
+
+#if ENABLE_BME280 && ENABLE_BH1750
+    if (do_bme280 && do_bh1750) {
+        ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Light: %.1f lux, Bat: %d %%",
+                 temp, hum, press/10.0f, lux, battery_percentage);
+    } else if (do_bme280) {
+        ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%",
+                 temp, hum, press/10.0f, battery_percentage);
+    } else if (do_bh1750) {
+        ESP_LOGI(TAG, "Readings: Light: %.1f lux, Bat: %d %%", lux, battery_percentage);
+    } else {
+        ESP_LOGI(TAG, "Readings: Bat: %d %% (no sensor due)", battery_percentage);
+    }
+#elif ENABLE_BME280
+    if (do_bme280) {
+        ESP_LOGI(TAG, "Readings: Temp: %.2f C, Humidity: %.2f %%, Pressure: %.2f kPa, Bat: %d %%",
+                 temp, hum, press/10.0f, battery_percentage);
+    } else {
+        ESP_LOGI(TAG, "Readings: Bat: %d %% (no sensor due)", battery_percentage);
+    }
+#elif ENABLE_BH1750
+    if (do_bh1750) {
+        ESP_LOGI(TAG, "Readings: Light: %.1f lux, Bat: %d %%", lux, battery_percentage);
+    } else {
+        ESP_LOGI(TAG, "Readings: Bat: %d %% (no sensor due)", battery_percentage);
+    }
 #else
     ESP_LOGI(TAG, "Readings: Bat: %d %%", battery_percentage);
 #endif
@@ -326,7 +456,7 @@ static void one_time_sensor_task(void *pvParameters) {
 
 static void sensor_task_trigger_cb(uint8_t param) {
     xTaskCreate(one_time_sensor_task, "sensor_task", 4096, NULL, 3, NULL);
-    esp_zb_scheduler_alarm((esp_zb_callback_t)sensor_task_trigger_cb, 0, SENSOR_CHECK_INTERVAL_S * 1000);
+    esp_zb_scheduler_alarm((esp_zb_callback_t)sensor_task_trigger_cb, 0, get_base_interval_s() * 1000);
 }
 
 static void bdb_start_top_level_commissioning_cb(uint8_t mode_mask) {
@@ -355,6 +485,7 @@ void esp_zb_app_signal_handler(esp_zb_app_signal_t *signal_struct) {
                 } else {
                     ESP_LOGI(TAG, "Device rebooted, already in network.");
                     zb_configure_reporting();
+                    zb_configure_binding();
                 }
             }
             break;

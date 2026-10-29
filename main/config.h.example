@@ -42,29 +42,28 @@
 // ==========================================
 // Sensor Sampling Intervals (in seconds)
 // ==========================================
-// Regular sensors (BME280, BH1750, Battery)
-#define SENSOR_CHECK_INTERVAL_S         120
-
-// SCD41 CO2 sensor (low-frequency power saving, e.g. 300s = 5 min)
+#define BME280_CHECK_INTERVAL_S         120
+#define BH1750_CHECK_INTERVAL_S         30
 #define SCD41_CHECK_INTERVAL_S          600
-
-// Number of regular sensor cycles per SCD41 measurement
-#if (SCD41_CHECK_INTERVAL_S < SENSOR_CHECK_INTERVAL_S)
-#define SCD41_SAMPLE_CYCLES             1
-#else
-#define SCD41_SAMPLE_CYCLES             (SCD41_CHECK_INTERVAL_S / SENSOR_CHECK_INTERVAL_S)
-#endif
 
 // ==========================================
 // Zigbee Reporting Intervals (in seconds)
 // ==========================================
-// Regular sensors (min interval equals sampling interval)
-#define ZB_REPORT_MIN_INTERVAL_S        SENSOR_CHECK_INTERVAL_S
-#define ZB_REPORT_MAX_INTERVAL_S        (10 * 60) // 10 minutes
+// BME280 (Temperature, Humidity, Pressure)
+#define ZB_REPORT_BME280_MIN_INTERVAL_S BME280_CHECK_INTERVAL_S
+#define ZB_REPORT_BME280_MAX_INTERVAL_S (10 * 60) // 10 minutes
 
-// SCD41 CO2 reporting (min interval equals SCD41 sampling interval)
-#define ZB_REPORT_CO2_MIN_INTERVAL_S    SCD41_CHECK_INTERVAL_S
-#define ZB_REPORT_CO2_MAX_INTERVAL_S    (30 * 60) // 30 minutes
+// BH1750 (Illuminance)
+#define ZB_REPORT_BH1750_MIN_INTERVAL_S BH1750_CHECK_INTERVAL_S
+#define ZB_REPORT_BH1750_MAX_INTERVAL_S (10 * 60) // 10 minutes
+
+// SCD41 (CO2)
+#define ZB_REPORT_SCD41_MIN_INTERVAL_S  SCD41_CHECK_INTERVAL_S
+#define ZB_REPORT_SCD41_MAX_INTERVAL_S  (30 * 60) // 30 minutes
+
+// Battery
+#define ZB_REPORT_BATT_MIN_INTERVAL_S   BME280_CHECK_INTERVAL_S
+#define ZB_REPORT_BATT_MAX_INTERVAL_S   (10 * 60) // 10 minutes
 
 // ==========================================
 // Reporting Delta Thresholds (Reportable Change)
